@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>❤ 粒子爱心</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0a14; }
+  #cv { position: fixed; inset: 0; display: block; touch-action: none; }
+  #title {
+    position: fixed; top: 9vh; left: 0; right: 0; text-align: center;
+    font: 600 clamp(20px, 5vw, 36px)/1.3 "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: #FFB6C9; letter-spacing: .08em;
+    text-shadow: 0 0 12px rgba(255,140,170,.95), 0 0 32px rgba(255,90,130,.65);
+    opacity: 0; transition: opacity 1.2s; pointer-events: none; padding: 0 16px;
+  }
+  #title.show { opacity: 1; }
+  #msg {
+    position: fixed; bottom: 7vh; left: 0; right: 0; text-align: center;
+    font: 600 clamp(18px, 4.5vw, 32px)/1.5 "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: #FFC4D5; letter-spacing: .06em;
+    text-shadow: 0 0 10px rgba(255,140,170,.9), 0 0 28px rgba(255,90,130,.6);
+    opacity: 0; transition: opacity 1s; pointer-events: none; padding: 0 20px;
+  }
+  #msg.show { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="title"></div>
+<div id="msg"></div>
+<script>
+"use strict";
+/* ================== 在这里改你想要的内容 ================== */
+var CONFIG = {
+  /* 轮播想说的话：想几句就写几句，只改引号里的字 */
+  MESSAGES: [
+    "嘿嘿嘿，这是WYY给WC制作的哟",
+    "遇见你是俺最大的幸运",
+    "要照顾好自己呀",
+    "每天都要开开心心的呀",
+    "也希望俺们能够一直陪伴彼此"
+  ],
+  MSG_TIME: 4000,               // 每句话显示多久（毫秒）
+  TITLE: "",                    // 顶部大标题，留空 "" 就不显示
+  HEART_COLORS: ["#FF8CAA", "#FF8CAA", "#FF8CAA", "#FF6A8F", "#FFB3C8", "#FF6822"],  // 粒子颜色（粉为主，少量橘红）
+  EXPLODE_EVERY: 25000,         // 每隔多久爱心炸开重聚一次（毫秒），0 表示不炸
+};
+/* ======================================================== */
+
+var canvas = document.getElementById("cv");
+var ctx = canvas.getContext("2d");
+var W = 0, H = 0, CX = 0, CY = 0, SCALE = 0;
+
+function resize() {
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(window.innerWidth * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  W = window.innerWidth; H = window.innerHeight;   // 后面都用 CSS 像素
+  CX = W * 0.5; CY = H * 0.50;
+  SCALE = Math.min(W, H) * 0.028;   // 爱心大小（约和原版同款：占屏幕一半宽、七成高）
+}
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", function () { setTimeout(resize, 200); });
+resize();
+
+/* ---------- 星空背景 ---------- */
+var stars = [];
+for (var i = 0; i < 120; i++) {
+  stars.push({ x: Math.random(), y: Math.random(), r: Math.random() * 1.1 + 0.3,
+               tw: Math.random() * Math.PI * 2, sp: 0.5 + Math.random() * 1.5 });
+}
+
+/* ---------- 爱心曲线（经典参数方程） ---------- */
+function heartPoint(t) {
+  return {
+    x: 16 * Math.pow(Math.sin(t), 3),
+    y: 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)
+  };
+}
+
+/* 按弧长均匀取点：让爱心轮廓每一处粒子密度一样（原版效果） */
+var CURVE_N = 2000;
+var curvePts = [];
+(function () {
+  for (var i = 0; i < CURVE_N; i++) {
+    curvePts.push(heartPoint(i / CURVE_N * Math.PI * 2));
+  }
+  // 累积弧长
+  var cum = [0];
+  for (var j = 1; j < CURVE_N; j++) {
+    var dx = curvePts[j].x - curvePts[j - 1].x;
+    var dy = curvePts[j].y - curvePts[j - 1].y;
+    cum.push(cum[j - 1] + Math.sqrt(dx * dx + dy * dy));
+  }
+  var total = cum[CURVE_N - 1];
+  // 二分查：给定弧长位置 → 曲线点
+  curvePts.at = function (s) {
+    var lo = 0, hi = CURVE_N - 1;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (cum[mid] < s) lo = mid + 1; else hi = mid;
+    }
+    return curvePts[lo];
+  };
+  curvePts.total = total;
+})();
+
+/* ---------- 粒子 ----------
+   两种状态：settled（落在爱心曲线上，带轻微抖动）
+            fly（从屏幕某处飞向曲线上的新位置）
+   常态下约 12% 的粒子在飞，形成满屏流星的既视感；
+   炸开时全部粒子向外爆开，再重新飞回爱心。 */
+var N = Math.max(500, Math.min(2400, Math.round(W * H / 400)));
+var particles = [];
+var colors = CONFIG.HEART_COLORS;
+var now = 0;
+
+/* 粒子在爱心上的基准位置（爱心坐标系，随弧长均匀分布） */
+function curveSpot(i) {
+  var pt = curvePts.at((i % N) / N * curvePts.total);
+  return { bx: pt.x, by: pt.y };
+}
+
+function newParticle(i) {
+  var spot = curveSpot(i);
+  return {
+    bx: spot.bx, by: spot.by,               // 爱心上的落点（弧长均匀 → 轮廓密度均匀）
+    jx: (Math.random() - 0.5) * 2,          // 落点抖动，让爱心有毛边
+    jy: (Math.random() - 0.5) * 2,
+    x: Math.random() * W,                   // 开场从屏幕各处飞来
+    y: Math.random() * H,
+    vx: 0, vy: 0,
+    ease: 0.02 + Math.random() * 0.04,
+    size: 0.8 + Math.random() * 1.8,
+    color: colors[i % colors.length],
+    bright: i % 3 === 0,                    // 1/3 粒子带光晕
+    mode: "fly",                            // fly | settled | burst
+    rest: 3000 + Math.random() * 12000,     // 一上来先冲向爱心
+    burstUntil: 0
+  };
+}
+function initParticles() {
+  particles = [];
+  for (var i = 0; i < N; i++) particles.push(newParticle(i));
+}
+initParticles();
+
+/* ---------- 炸开 ---------- */
+var exploded = false;
+
+function explode() {
+  var R = Math.max(W, H);
+  for (var i = 0; i < N; i++) {
+    var p = particles[i];
+    var a = Math.random() * Math.PI * 2;
+    var sp = (0.3 + Math.random() * 1.2) * R * 0.004;
+    p.mode = "burst";
+    p.burstUntil = now + 900 + Math.random() * 500;   // 爆开约 1 秒后飞回爱心
+    p.vx = Math.cos(a) * sp * (0.5 + Math.random());
+    p.vy = Math.sin(a) * sp * (0.5 + Math.random());
+  }
+  exploded = true;
+}
+setTimeout(explode, 300);                  // 开场：先炸一下再聚成爱心
+
+if (CONFIG.EXPLODE_EVERY > 0) {
+  setInterval(explode, CONFIG.EXPLODE_EVERY);
+}
+canvas.addEventListener("pointerdown", explode);   // 点击/触摸屏幕也会炸
+
+/* ---------- 文字轮播 ---------- */
+var msgEl = document.getElementById("msg");
+var titleEl = document.getElementById("title");
+var msgIdx = 0;
+
+if (CONFIG.TITLE) {
+  titleEl.textContent = CONFIG.TITLE;
+  titleEl.classList.add("show");
+}
+function cycleMsg() {
+  var m = CONFIG.MESSAGES[msgIdx % CONFIG.MESSAGES.length];
+  msgIdx++;
+  msgEl.textContent = m;
+  msgEl.classList.add("show");
+  setTimeout(function () { msgEl.classList.remove("show"); }, CONFIG.MSG_TIME - 900);
+  setTimeout(cycleMsg, CONFIG.MSG_TIME);
+}
+if (CONFIG.MESSAGES.length) setTimeout(cycleMsg, 800);
+
+/* ---------- 主循环 ---------- */
+var last = performance.now();
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  var dt = Math.min(50, ts - last); last = ts;
+  now = ts;
+
+  // 原版无拖尾：整屏清掉再重画
+  ctx.fillStyle = "#0a0a14";
+  ctx.fillRect(0, 0, W, H);
+
+  // 星星
+  for (var i = 0; i < stars.length; i++) {
+    var s = stars[i];
+    var a = 0.2 + 0.5 * (0.5 + 0.5 * Math.sin(ts / 1000 * s.sp + s.tw));
+    ctx.fillStyle = "rgba(255,255,255," + a.toFixed(3) + ")";
+    ctx.fillRect(s.x * W, s.y * H, s.r, s.r);
+  }
+
+  for (var j = 0; j < N; j++) {
+    var p = particles[j];
+    var tx, ty;
+
+    if (p.mode === "burst") {
+      // 惯性飞出，带阻尼
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.94; p.vy *= 0.94;
+      if (now >= p.burstUntil) p.mode = "fly";
+    } else {
+      tx = CX + p.bx * SCALE + p.jx * SCALE * 0.10;
+      ty = CY - p.by * SCALE + p.jy * SCALE * 0.10;
+
+      if (p.mode === "fly") {
+        p.vx = (tx - p.x) * p.ease;
+        p.vy = (ty - p.y) * p.ease;
+        p.x += p.vx; p.y += p.vy;
+        if (Math.abs(p.x - tx) < 1 && Math.abs(p.y - ty) < 1) {
+          p.mode = "settled";
+          p.rest = 4000 + Math.random() * 12000;   // 停 4~16 秒后再次起飞
+          p.ease = 0.02 + Math.random() * 0.04;
+        }
+      } else {
+        // settled：贴在曲线上，轻微抖动
+        p.x += (tx - p.x) * 0.3;
+        p.y += (ty - p.y) * 0.3;
+        p.rest -= dt;
+        if (p.rest <= 0) {
+          // 起飞：从当前位置飞向曲线上的新落点
+          var spot = curveSpot(Math.floor(Math.random() * N));
+          p.bx = spot.bx; p.by = spot.by;
+          p.mode = "fly";
+          p.ease = 0.02 + Math.random() * 0.04;
+        }
+      }
+    }
+
+    if (p.bright) {
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  }
+  if (exploded) exploded = false;
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
